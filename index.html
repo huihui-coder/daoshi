@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>建筑导览系统 - 新区综合教学楼B</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+  <style>
+    body{margin:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}
+    .loading-spinner{border:4px solid #e5e7eb;border-top-color:#3b82f6;border-radius:50%;width:48px;height:48px;animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body class="bg-slate-100">
+  <div id="loading" class="fixed inset-0 bg-white z-50 flex items-center justify-center">
+    <div class="text-center"><div class="loading-spinner mx-auto mb-4"></div><p class="text-slate-600">正在加载建筑数据...</p></div>
+  </div>
+
+  <div class="flex h-screen">
+    <div class="w-72 bg-white border-r border-slate-200 flex flex-col shadow-lg z-20">
+      <div class="p-6 border-b border-slate-100">
+        <h1 class="text-xl font-bold text-slate-800">🏢 建筑导览系统</h1>
+        <p class="text-sm text-slate-500 mt-1">新区综合教学楼B · 一层</p>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div class="p-4 bg-slate-50 rounded-xl">
+          <h3 class="text-sm font-bold text-slate-700 mb-2">📊 统计</h3>
+          <div class="text-2xl font-bold text-blue-600" id="room-count">--</div>
+          <div class="text-xs text-slate-500" id="info-count">--</div>
+        </div>
+        <div id="selected-info" class="hidden p-4 bg-amber-50 border border-amber-200 rounded-xl">
+          <h3 class="text-sm font-bold text-amber-800 mb-2">✨ 已选中</h3>
+          <div id="selected-name" class="text-lg font-bold text-amber-700"></div>
+          <div id="selected-details" class="mt-2 text-sm text-amber-600 space-y-1"></div>
+        </div>
+        <div class="p-4 bg-blue-50 border border-blue-200 rounded-xl">
+          <h3 class="text-sm font-bold text-blue-800 mb-2">💡 操作</h3>
+          <ul class="text-xs text-blue-700 space-y-1">
+            <li>• 左键拖动：旋转</li><li>• 右键拖动：平移</li><li>• 滚轮：缩放</li><li>• 点击：选择房间</li>
+          </ul>
+        </div>
+        <div class="p-4 bg-slate-50 rounded-xl">
+          <h3 class="text-sm font-bold text-slate-700 mb-2">🎨 图例</h3>
+          <div id="legend" class="grid grid-cols-2 gap-2 text-xs"></div>
+        </div>
+      </div>
+      <div class="p-4 border-t border-slate-100 text-center text-xs text-slate-400">基于 DXF 构建</div>
+    </div>
+
+    <div id="canvas-container" class="flex-1 relative">
+      <div id="tooltip" class="fixed hidden bg-white/95 backdrop-blur px-4 py-3 rounded-xl shadow-2xl border border-slate-200 min-w-[220px] z-30 pointer-events-none">
+        <div id="tooltip-header" class="text-base font-bold text-slate-800 mb-2 pb-2 border-b border-slate-200"></div>
+        <div id="tooltip-body" class="space-y-1.5 text-sm"></div>
+      </div>
+      <div class="absolute bottom-6 left-6 text-6xl font-bold text-slate-200 pointer-events-none select-none">1F</div>
+      <div class="absolute bottom-6 right-6 bg-white/90 px-3 py-2 rounded-xl text-xs text-slate-500">🖱️ 拖动旋转 | 滚轮缩放</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const ROOM_COLORS = {
+      '办公': 0x7dd3fc, '教室': 0x86efac, '实验': 0xc4b5fd, '服务': 0xfda4af,
+      '卫生': 0xd1d5db, '楼梯': 0xfcd34d, '设备': 0xfdba74, '机房': 0x67e8f9, 'default': 0xa5b4fc
+    };
+
+    const legendEl = document.getElementById('legend');
+    Object.entries(ROOM_COLORS).forEach(([t, c]) => {
+      if (t === 'default') return;
+      legendEl.innerHTML += `<div class="flex items-center gap-2"><div class="w-4 h-3 rounded" style="background:#${c.toString(16).padStart(6,'0')}"></div><span>${t}</span></div>`;
+    });
+
+    function parseRoomInfo(text) {
+      let clean = text.replace(/\{\\f[^;]*;/g,'').replace(/\\f[^;]*;/g,'').replace(/\}/g,'').replace(/\{/g,'')
+        .replace(/\\P/g,'\n').replace(/\\p[^;]*;/g,'').replace(/\\[A-Za-z]/g,' ').trim();
+      const info = {}, patterns = {
+        roomNumber:/房间编号[：:]\s*(\S+)/, roomName:/房间名称[：:]\s*([^\n]+)/, roomType:/房间属性[：:]\s*([^\n]+)/,
+        usableArea:/使用面积[：:]\s*([\d.]+)/, buildingArea:/建筑面积[：:]\s*([\d.]+)/,
+        users:/使用人员[：:]\s*([^\n]*)/, manager:/管理人员[：:]\s*([^\n]+)/, department:/[（(]([^）)]+)[）)]\s*$/
+      };
+      for (const [k,p] of Object.entries(patterns)) {
+        const m = clean.match(p);
+        if (m?.[1]) info[k] = (k.includes('Area') ? m[1].trim()+' ㎡' : m[1].trim());
+      }
+      return Object.keys(info).length ? info : null;
+    }
+
+    function parseDXF(text) {
+      const rooms = [], labels = [], lines = text.split('\n').map(l => l.trim());
+      let roomId = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i] === 'LWPOLYLINE') {
+          let layer = '', closed = false, points = [], j = i + 1;
+          while (j < lines.length && lines[j] !== '0') {
+            const code = parseInt(lines[j]), val = lines[j + 1];
+            if (code === 8) layer = val;
+            else if (code === 70) closed = (parseInt(val) & 1) === 1;
+            else if (code === 10) {
+              const x = parseFloat(val);
+              let k = j + 2;
+              while (k < lines.length && parseInt(lines[k]) !== 20) k += 2;
+              if (k < lines.length) points.push({ x, y: parseFloat(lines[k + 1]) });
+            }
+            j += 2; if (lines[j] === '0') break;
+          }
+          if (layer === '使用面积线' && closed && points.length >= 3) {
+            const cx = points.reduce((s,p) => s+p.x, 0) / points.length;
+            const cy = points.reduce((s,p) => s+p.y, 0) / points.length;
+            rooms.push({ id: roomId++, points, center: {x:cx, y:cy}, info: null });
+          }
+          i = j - 1;
+        } else if (lines[i] === 'MTEXT') {
+          let layer = '', x = 0, y = 0, textParts = [], j = i + 1;
+          while (j < lines.length && lines[j] !== '0') {
+            const code = parseInt(lines[j]), val = lines[j + 1];
+            if (code === 8) layer = val;
+            else if (code === 10) x = parseFloat(val);
+            else if (code === 20) y = parseFloat(val);
+            else if (code === 3 || code === 1) textParts.push(val || '');
+            j += 2;
+          }
+          if (layer === '文字' && textParts.join('').includes('房间编号')) {
+            const info = parseRoomInfo(textParts.join(''));
+            if (info) labels.push({ x, y, info });
+          }
+          i = j - 1;
+        }
+      }
+      labels.forEach(label => {
+        let best = null, minDist = Infinity;
+        for (const room of rooms) {
+          const dist = Math.hypot(label.x - room.center.x, label.y - room.center.y);
+          if (dist < minDist) { minDist = dist; best = room; }
+        }
+        if (best && minDist < 15000) best.info = label.info;
+      });
+      return rooms;
+    }
+
+    function getRoomColor(info) {
+      if (!info) return ROOM_COLORS.default;
+      const text = ((info.roomType||'') + (info.roomName||'')).toLowerCase();
+      for (const [t,c] of Object.entries(ROOM_COLORS)) if (t !== 'default' && text.includes(t)) return c;
+      return ROOM_COLORS.default;
+    }
+
+    async function init() {
+      const res = await fetch('floor1.dxf');
+      const dxfText = await res.text();
+      const rooms = parseDXF(dxfText);
+
+      document.getElementById('room-count').textContent = `${rooms.length} 个房间`;
+      document.getElementById('info-count').textContent = `${rooms.filter(r=>r.info).length} 个有详细信息`;
+      document.getElementById('loading').style.display = 'none';
+
+      let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+      rooms.forEach(r => r.points.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); }));
+      const width = maxX-minX, height = maxY-minY, scale = 60/Math.max(width,height), offsetX = minX+width/2, offsetY = minY+height/2;
+
+      const container = document.getElementById('canvas-container');
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf8fafc);
+      const camera = new THREE.PerspectiveCamera(45, container.clientWidth/container.clientHeight, 0.1, 1000);
+      camera.position.set(0, 0, 80);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.shadowMap.enabled = true;
+      container.appendChild(renderer.domElement);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(20, 20, 40); dirLight.castShadow = true;
+      scene.add(dirLight);
+
+      const floor = new THREE.Mesh(new THREE.PlaneGeometry(width*scale*1.2, height*scale*1.2), new THREE.MeshStandardMaterial({color:0xf1f5f9}));
+      floor.position.z = -0.1; floor.receiveShadow = true;
+      scene.add(floor);
+
+      const roomMeshes = [], roomHeight = 1.5;
+      rooms.forEach(room => {
+        const shape = new THREE.Shape();
+        const pts = room.points.map(p => ({x:(p.x-offsetX)*scale, y:(p.y-offsetY)*scale}));
+        shape.moveTo(pts[0].x, pts[0].y);
+        pts.slice(1).forEach(p => shape.lineTo(p.x, p.y));
+        shape.closePath();
+        const geo = new THREE.ExtrudeGeometry(shape, {depth:roomHeight, bevelEnabled:false});
+        const mat = new THREE.MeshStandardMaterial({color:getRoomColor(room.info), side:THREE.DoubleSide});
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.castShadow = true; mesh.receiveShadow = true;
+        mesh.userData = { room, originalColor: getRoomColor(room.info), targetZ: 0 };
+        mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color:0x475569})));
+        scene.add(mesh);
+        roomMeshes.push(mesh);
+      });
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true; controls.minDistance = 30; controls.maxDistance = 200;
+
+      const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
+      let hoveredMesh = null, selectedMesh = null;
+      const tooltip = document.getElementById('tooltip'), tooltipHeader = document.getElementById('tooltip-header'), tooltipBody = document.getElementById('tooltip-body');
+
+      function updateTooltip(room, x, y) {
+        if (!room) { tooltip.classList.add('hidden'); return; }
+        const info = room.info, name = info?.roomName || `房间 ${room.id+1}`, num = info?.roomNumber || '';
+        tooltipHeader.innerHTML = num ? `<span class="text-blue-600 mr-2">${num}</span>${name}` : name;
+        tooltipBody.innerHTML = info ? `
+          ${info.roomType ? `<div class="flex justify-between"><span class="text-slate-500">属性:</span><span class="text-slate-700">${info.roomType}</span></div>` : ''}
+          ${info.usableArea ? `<div class="flex justify-between"><span class="text-slate-500">面积:</span><span class="text-slate-700">${info.usableArea}</span></div>` : ''}
+          ${info.users ? `<div class="flex justify-between"><span class="text-slate-500">人员:</span><span class="text-slate-700">${info.users}</span></div>` : ''}
+        ` : '<div class="text-slate-400">暂无详细信息</div>';
+        tooltip.style.left = (x+15)+'px'; tooltip.style.top = (y+15)+'px';
+        tooltip.classList.remove('hidden');
+      }
+
+      function updateSelected(room) {
+        const panel = document.getElementById('selected-info');
+        if (!room) { panel.classList.add('hidden'); return; }
+        const info = room.info;
+        document.getElementById('selected-name').textContent = info?.roomNumber ? `${info.roomNumber} - ${info?.roomName||''}` : (info?.roomName || `房间 ${room.id+1}`);
+        document.getElementById('selected-details').innerHTML = info ? `
+          ${info.roomType ? `<div>属性: ${info.roomType}</div>` : ''}${info.usableArea ? `<div>面积: ${info.usableArea}</div>` : ''}${info.users ? `<div>人员: ${info.users}</div>` : ''}
+        ` : '<div>暂无详细信息</div>';
+        panel.classList.remove('hidden');
+      }
+
+      container.addEventListener('mousemove', e => {
+        const rect = container.getBoundingClientRect();
+        mouse.x = ((e.clientX-rect.left)/rect.width)*2-1;
+        mouse.y = -((e.clientY-rect.top)/rect.height)*2+1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(roomMeshes);
+        if (intersects.length) {
+          const mesh = intersects[0].object;
+          if (mesh !== hoveredMesh) {
+            if (hoveredMesh && hoveredMesh !== selectedMesh) { hoveredMesh.material.color.setHex(hoveredMesh.userData.originalColor); hoveredMesh.userData.targetZ = 0; }
+            hoveredMesh = mesh;
+            if (mesh !== selectedMesh) { mesh.material.color.setHex(0x3b82f6); mesh.userData.targetZ = 0.4; }
+          }
+          updateTooltip(mesh.userData.room, e.clientX, e.clientY);
+          container.style.cursor = 'pointer';
+        } else {
+          if (hoveredMesh && hoveredMesh !== selectedMesh) { hoveredMesh.material.color.setHex(hoveredMesh.userData.originalColor); hoveredMesh.userData.targetZ = 0; }
+          hoveredMesh = null; updateTooltip(null); container.style.cursor = 'default';
+        }
+      });
+
+      container.addEventListener('click', () => {
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(roomMeshes);
+        if (selectedMesh) { selectedMesh.material.color.setHex(selectedMesh.userData.originalColor); selectedMesh.userData.targetZ = 0; }
+        if (intersects.length) {
+          selectedMesh = intersects[0].object;
+          selectedMesh.material.color.setHex(0xf59e0b); selectedMesh.userData.targetZ = 0.8;
+          updateSelected(selectedMesh.userData.room);
+        } else { selectedMesh = null; updateSelected(null); }
+      });
+
+      function animate() {
+        requestAnimationFrame(animate);
+        roomMeshes.forEach(m => m.position.z += (m.userData.targetZ - m.position.z) * 0.12);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth/container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+      });
+
+      animate();
+    }
+
+    init().catch(err => {
+      document.getElementById('loading').innerHTML = `<div class="text-center"><div class="text-6xl mb-4">❌</div><p class="text-red-600">加载失败: ${err.message}</p></div>`;
+    });
+  </script>
+</body>
+</html>
